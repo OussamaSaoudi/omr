@@ -91,7 +91,7 @@ MM_ForwardedHeader::getForwardedObject()
 {
 	omrobjectptr_t forwardedObject = NULL;
 
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+#if 0
 	uintptr_t forwardedTag = _forwardedTag | _beingCopiedHint;
 	if (isStrictlyForwardedPointer()) {
 #else
@@ -131,6 +131,7 @@ MM_ForwardedHeader::getNonStrictForwardedObject()
 uintptr_t
 MM_ForwardedHeader::copySetup(omrobjectptr_t destinationObjectPtr, uintptr_t *remainingSizeToCopy)
 {
+	Assert_MM_unimplemented();
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	uintptr_t copyOffset = referenceSize();
 
@@ -241,6 +242,7 @@ MM_ForwardedHeader::wait(uintptr_t *spinCount) {
 void
 MM_ForwardedHeader::copyOrWaitOutline(omrobjectptr_t destinationObjectPtr)
 {
+	Assert_MM_unimplemented();
 	uintptr_t spinCount = 10;
 
 	bool participatingInCopy = false;
@@ -292,6 +294,7 @@ MM_ForwardedHeader::copyOrWaitOutline(omrobjectptr_t destinationObjectPtr)
 void
 MM_ForwardedHeader::copyOrWaitWinner(omrobjectptr_t destinationObjectPtr)
 {
+	Assert_MM_unimplemented();
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	uintptr_t spinCount = 10;
 

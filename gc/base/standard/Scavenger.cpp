@@ -1465,7 +1465,7 @@ MM_Scavenger::copyAndForward(MM_EnvironmentStandard *env, GC_SlotObject *slotObj
 	omrobjectptr_t oldSlot = slotObject->readReferenceFromSlot();
 	omrobjectptr_t slot = oldSlot;
 	bool result = copyAndForward(env, &slot);
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+#if 0
 	if (concurrent_phase_scan == _concurrentPhase) {
 		if (oldSlot != slot) {
 			slotObject->atomicWriteReferenceToSlot(oldSlot, slot);
@@ -1635,7 +1635,7 @@ MM_Scavenger::copy(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHea
 	newCacheAlloc = (void *) (((uint8_t *)destinationObjectPtr) + objectReserveSizeInBytes);
 
 	omrobjectptr_t originalDestinationObjectPtr = destinationObjectPtr;
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+#if 0
 	uintptr_t remainingSizeToCopy = 0;
 	uintptr_t initialSizeToCopy = 0;
 	bool allowDuplicate = false;
@@ -1674,7 +1674,7 @@ MM_Scavenger::copy(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHea
 		valgrindMempoolAlloc(_extensions, (uintptr_t) destinationObjectPtr, objectReserveSizeInBytes);
 #endif /* defined(OMR_VALGRIND_MEMCHECK) */
 
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+#if 0
 		if (!allowDuplicateOrConcurrentDisabled) {
 			/* Copy a non-aligned section */
 			forwardedHeader->copySection(destinationObjectPtr, remainingSizeToCopy, initialSizeToCopy);
@@ -1715,7 +1715,7 @@ MM_Scavenger::copy(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHea
 		omrtty_printf("{SCAV: Copied %p[%p] -> %p[%p]}\n", forwardedHeader->getObject(), *((uintptr_t*)(forwardedHeader->getObject())), destinationObjectPtr, *((uintptr_t*)destinationObjectPtr));
 #endif /* OMR_SCAVENGER_TRACE_COPY */
 
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+#if 0
 	/* Concurrent Scavenger can update forwarding pointer only after the object has been copied
 	 * (since mutator may access the object as soon as forwarding pointer is installed) */
 	}
@@ -1986,7 +1986,7 @@ MM_Scavenger::scavengeObjectSlots(MM_EnvironmentStandard *env, MM_CopyScanCacheS
 	}
 #if defined(OMR_GC_MODRON_CONCURRENT_MARK)
 	bool isParentInNewSpace = isObjectInNewSpace(objectPtr);
-	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && IS_CONCURRENT_ENABLED && !isParentInNewSpace && !shouldRemember) {
+	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && false && !isParentInNewSpace && !shouldRemember) {
 		/* Old object that has only references to old objects. If parent object has already been scanned (in Marking sense)
 		 * since it has been tenured, let Concurrent Marker know it has a newly created old reference, otherwise it may miss to find it. */
 		oldToOldReferenceCreated(env, objectPtr);
@@ -2138,7 +2138,7 @@ MM_Scavenger::incrementalScavengeObjectSlots(MM_EnvironmentStandard *env, omrobj
 
 #if defined(OMR_GC_MODRON_CONCURRENT_MARK)
 	bool isParentInNewSpace = isObjectInNewSpace(objectPtr);
-	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && IS_CONCURRENT_ENABLED && !isParentInNewSpace && !scanCache->_shouldBeRemembered) {
+	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && false && !isParentInNewSpace && !scanCache->_shouldBeRemembered) {
 		/* Old object that has only references to old objects. If parent object has already been scanned (in Marking sense)
 		 * since it has been tenured, let Concurrent Marker know it has a newly created old reference, otherwise it may miss to find it. */
 		oldToOldReferenceCreated(env, objectPtr);
@@ -2978,6 +2978,7 @@ MM_Scavenger::pruneRememberedSetList(MM_EnvironmentStandard *env)
 void
 MM_Scavenger::scavengeRememberedSetListDirect(MM_EnvironmentStandard *env)
 {
+	Assert_MM_unimplemented();
 	Trc_MM_ParallelScavenger_scavengeRememberedSetList_Entry(env->getLanguageVMThread());
 
 	MM_SublistPuddle *puddle = NULL;
@@ -3013,6 +3014,7 @@ MM_Scavenger::scavengeRememberedSetListDirect(MM_EnvironmentStandard *env)
 void
 MM_Scavenger::scavengeRememberedSetListIndirect(MM_EnvironmentStandard *env)
 {
+	Assert_MM_unreachable();
 	Trc_MM_ParallelScavenger_scavengeRememberedSetList_Entry(env->getLanguageVMThread());
 
 	MM_SublistPuddle *puddle = NULL;
