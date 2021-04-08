@@ -91,7 +91,7 @@ MM_ForwardedHeader::getForwardedObject()
 {
 	omrobjectptr_t forwardedObject = NULL;
 
-#if 0
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	uintptr_t forwardedTag = _forwardedTag | _beingCopiedHint;
 	if (isStrictlyForwardedPointer()) {
 #else
