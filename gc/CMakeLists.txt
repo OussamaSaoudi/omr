@@ -56,6 +56,10 @@ omr_add_library(omrgc_tracegen OBJECT
 	${CMAKE_CURRENT_BINARY_DIR}/ut_j9vgc.c
 )
 
+if(OMR_TOOLCONFIG STREQUAL "gnu")
+   set_source_files_properties(Scavenger.cpp PROPERTIES  COMPILE_FLAGS  -finline-limit=2000)
+endif()
+
 target_include_directories(omrgc_tracegen
 	PUBLIC
 		$<TARGET_PROPERTY:omr_base,INTERFACE_INCLUDE_DIRECTORIES>
