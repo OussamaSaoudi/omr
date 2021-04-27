@@ -61,6 +61,12 @@ struct OMR_VM;
 
 extern "C" void concurrentScavengerAsyncCallbackHandler(OMR_VMThread *omrVMThread);
 
+/* create macros to interpret the hot field descriptor */
+#define HOTFIELD_SHOULD_ALIGN(descriptor) (0x1 == (0x1 & (descriptor)))
+#define HOTFIELD_ALIGNMENT_BIAS(descriptor, heapObjectAlignment) (((descriptor) >> 1) * (heapObjectAlignment))
+/* If scavenger dynamicBreadthFirstScanOrdering and alwaysDepthCopyFirstOffset is enabled, always copy the first offset of each object after the object itself is copied */
+#define DEFAULT_HOT_FIELD_OFFSET 1
+
 /**
  * @todo Provide class documentation
  * @ingroup GC_Modron_Standard
@@ -274,8 +280,250 @@ public:
 	 */	
 	MMINLINE void forwardingSucceeded(MM_EnvironmentStandard *env, MM_CopyScanCacheStandard *copyCache, void *newCacheAlloc, uintptr_t oldObjectAge, uintptr_t objectCopySizeInBytes, uintptr_t objectReserveSizeInBytes);
 
-	MMINLINE omrobjectptr_t copy(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHeader);
-	
+	template <bool csEnabled>
+	omrobjectptr_t copy(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHeader)
+	{
+		uintptr_t objectCopySizeInBytes, objectReserveSizeInBytes;
+		uintptr_t hotFieldsDescriptor = 0;
+		uintptr_t hotFieldsAlignment = 0;
+		uintptr_t* hotFieldPadBase = NULL;
+		uintptr_t hotFieldPadSize = 0;
+		MM_CopyScanCacheStandard *copyCache = NULL;
+		bool const compressed = _extensions->compressObjectReferences();
+
+		if (isBackOutFlagRaised()) {
+			/* Waste of time to copy, if we aborted */
+			return NULL;
+		}
+		/* Try and find memory for the object based on its age */
+		uintptr_t objectAge = _extensions->objectModel.getPreservedAge(forwardedHeader);
+		uintptr_t oldObjectAge = objectAge;
+
+		/* Object is in the evacuate space but not forwarded. */
+		_extensions->objectModel.calculateObjectDetailsForCopy(env, forwardedHeader, &objectCopySizeInBytes, &objectReserveSizeInBytes, &hotFieldsDescriptor);
+
+		Assert_MM_objectAligned(env, objectReserveSizeInBytes);
+
+		if (0 == (((uintptr_t)1 << objectAge) & _tenureMask)) {
+			/* The object should be flipped - try to reserve room in the semi space */
+			copyCache = reserveMemoryForAllocateInSemiSpace(env, forwardedHeader->getObject(), objectReserveSizeInBytes);
+			if (NULL != copyCache) {
+				/* Adjust the age value*/
+				if(objectAge < OBJECT_HEADER_AGE_MAX) {
+					objectAge += 1;
+				}
+			} else {
+				Trc_MM_Scavenger_semispaceAllocateFailed(env->getLanguageVMThread(), objectReserveSizeInBytes, "yes");
+/*
+				uintptr_t spaceAvailableForObject = _activeSubSpace->getMaxSpaceForObjectInEvacuateMemory(forwardedHeader->getObject());
+				Assert_GC_true_with_message4(env, objectCopySizeInBytes <= spaceAvailableForObject,
+						"Corruption in Evacuate at %p: calculated object size %zu larger then available %zu, Forwarded Header at %p\n",
+						forwardedHeader->getObject(), objectCopySizeInBytes, spaceAvailableForObject, forwardedHeader);
+*/
+				copyCache = reserveMemoryForAllocateInTenureSpace(env, forwardedHeader->getObject(), objectReserveSizeInBytes);
+				if (NULL != copyCache) {
+					/* Clear age and set the old bit */
+					objectAge = STATE_NOT_REMEMBERED;
+				} else {
+					Trc_MM_Scavenger_tenureAllocateFailed(env->getLanguageVMThread(), objectReserveSizeInBytes, env->_scavengerStats._failedTenureLargest, "no");
+				}
+			}
+		} else {
+			/* Move straight to tenuring on the object */
+			/* adjust the reserved object's size if we are aligning hot fields and this class has a known hot field */
+			if (_extensions->scavengerAlignHotFields && HOTFIELD_SHOULD_ALIGN(hotFieldsDescriptor)) {
+				/* this optimization is a source of fragmentation (alloc request size always assumes maximum padding,
+				* but free entry created by sweep in tenure could be less than that (since some of unused padding can overlap with next copied object)).
+				* we limit this optimization for arrays up to the size of 2 cache lines, beyond which the benefits of the optimization are believed to be non-existant */
+				if (!_extensions->objectModel.isIndexable(forwardedHeader) || (objectReserveSizeInBytes <= 2 * _cacheLineAlignment)) {
+					/* set the descriptor field if we should be aligning (since assuming that 0 means no is not safe) */
+					hotFieldsAlignment = hotFieldsDescriptor;
+					/* for simplicity, add the maximum padding we could need (and back off after allocation) */
+					objectReserveSizeInBytes += (_cacheLineAlignment - _objectAlignmentInBytes);
+					Assert_MM_objectAligned(env, objectReserveSizeInBytes);
+				}
+			}
+			copyCache = reserveMemoryForAllocateInTenureSpace(env, forwardedHeader->getObject(), objectReserveSizeInBytes);
+			if (NULL != copyCache) {
+				/* Clear age and set the old bit */
+				objectAge = STATE_NOT_REMEMBERED;
+			} else {
+				Trc_MM_Scavenger_tenureAllocateFailed(env->getLanguageVMThread(), objectReserveSizeInBytes, env->_scavengerStats._failedTenureLargest, "yes");
+/*
+				uintptr_t spaceAvailableForObject = _activeSubSpace->getMaxSpaceForObjectInEvacuateMemory(forwardedHeader->getObject());
+				Assert_GC_true_with_message4(env, objectCopySizeInBytes <= spaceAvailableForObject,
+						"Corruption in Evacuate at %p: calculated object size %zu larger then available %zu, Forwarded Header at %p\n",
+						forwardedHeader->getObject(), objectCopySizeInBytes, spaceAvailableForObject, forwardedHeader);
+*/
+				copyCache = reserveMemoryForAllocateInSemiSpace(env, forwardedHeader->getObject(), objectReserveSizeInBytes);
+				if (NULL != copyCache) {
+					/* Adjust the age value*/
+					if(objectAge < OBJECT_HEADER_AGE_MAX) {
+						objectAge += 1;
+					} else {
+						Trc_MM_Scavenger_semispaceAllocateFailed(env->getLanguageVMThread(), objectReserveSizeInBytes, "no");
+					}
+				}
+			}
+		}
+
+		/* Check if memory was reserved successfully */
+		if (NULL == copyCache) {
+			/* Failure - the scavenger must back out the work it has done. */
+			/* raise the alert and return (with NULL) */
+			setBackOutFlag(env, backOutFlagRaised);
+			omrthread_monitor_enter(_scanCacheMonitor);
+			if (0 != _waitingCount) {
+				omrthread_monitor_notify_all(_scanCacheMonitor);
+			}
+			omrthread_monitor_exit(_scanCacheMonitor);
+			return NULL;
+		}
+
+		/* Memory has been reserved */
+		omrobjectptr_t destinationObjectPtr = (omrobjectptr_t)copyCache->cacheAlloc;
+		/* now correct for the hot field alignment */
+		if (0 != hotFieldsAlignment) {
+			uintptr_t remainingInCacheLine = _cacheLineAlignment - ((uintptr_t)destinationObjectPtr % _cacheLineAlignment);
+			uintptr_t alignmentBias = HOTFIELD_ALIGNMENT_BIAS(hotFieldsAlignment, _objectAlignmentInBytes);
+			/* do alignment only if the object cannot fit in the remaining space in the cache line */
+			if ((remainingInCacheLine < objectCopySizeInBytes) && (alignmentBias < remainingInCacheLine)) {
+				hotFieldPadSize = ((remainingInCacheLine + _cacheLineAlignment) - (alignmentBias % _cacheLineAlignment)) % _cacheLineAlignment;
+				hotFieldPadBase = (uintptr_t *)destinationObjectPtr;
+				/* now fix the object pointer so that the hot field is aligned */
+				destinationObjectPtr = (omrobjectptr_t)((uintptr_t)destinationObjectPtr + hotFieldPadSize);
+			}
+			/* and update the reserved size so that we "un-reserve" the extra memory we said we might need.  This is done by
+			* removing the excess reserve since we already accounted for the hotFieldPadSize by bumping the destination pointer
+			* and now we need to revert to the amount needed for the object allocation and its array alignment so the rest of
+			* the method continues to function without needing to know about this extra alignment calculation
+			*/
+			objectReserveSizeInBytes = objectReserveSizeInBytes - (_cacheLineAlignment - _objectAlignmentInBytes);
+		}
+
+		/* and correct for the double array alignment */
+		void *newCacheAlloc = (void *) (((uint8_t *)destinationObjectPtr) + objectReserveSizeInBytes);
+
+		omrobjectptr_t originalDestinationObjectPtr = destinationObjectPtr;
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+		uintptr_t remainingSizeToCopy = 0;
+		uintptr_t initialSizeToCopy = 0;
+		bool allowDuplicate = false;
+		bool allowDuplicateOrConcurrentDisabled = true;
+
+		if (csEnabled) {
+			/* For smaller objects, we allow duplicate (copy first and try to win forwarding).
+			* For larger objects, there is only one copy (threads setup destination header, one wins, and other participate in copying or wait till copy is complete).
+			* 1024 is somewhat arbitrary threshold, so that most of time we do not have to go through relatively expensive setup procedure.
+			*/
+			if (objectCopySizeInBytes <= 1024) {
+				allowDuplicate = true;
+			} else {
+				remainingSizeToCopy = objectCopySizeInBytes;
+				initialSizeToCopy = forwardedHeader->copySetup(destinationObjectPtr, &remainingSizeToCopy);
+				/* set the hint in the f/w pointer, that the object might still be in the processes of copying */
+				destinationObjectPtr = forwardedHeader->setForwardedObjectWithBeingCopiedHint(destinationObjectPtr);
+				allowDuplicateOrConcurrentDisabled = false;
+			}
+		} else
+#endif /* OMR_GC_CONCURRENT_SCAVENGER */
+		{
+			destinationObjectPtr = forwardedHeader->setForwardedObject(destinationObjectPtr);
+		}
+
+		/* outter if-forwarding-succeeded check */
+		if (originalDestinationObjectPtr == destinationObjectPtr) {
+			/* Succeeded in forwarding the object [nonCS],
+			* or we allow duplicate (did not even tried to forward yet) [CS].
+			*/
+
+			if (NULL != hotFieldPadBase) {
+				/* lay down a hole (XXX:  This assumes that we are using AOL (address-ordered-list)) */
+				MM_HeapLinkedFreeHeader::fillWithHoles(hotFieldPadBase, hotFieldPadSize, compressed);
+			}
+
+#if defined(OMR_VALGRIND_MEMCHECK)
+			valgrindMempoolAlloc(_extensions, (uintptr_t) destinationObjectPtr, objectReserveSizeInBytes);
+#endif /* defined(OMR_VALGRIND_MEMCHECK) */
+
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+			if (!allowDuplicateOrConcurrentDisabled) {
+				/* Copy a non-aligned section */
+				forwardedHeader->copySection(destinationObjectPtr, remainingSizeToCopy, initialSizeToCopy);
+
+				/* Try to copy more aligned sections. Once no more sections to copy, wait till other threads are done with their sections */
+				forwardedHeader->copyOrWaitWinner(destinationObjectPtr);
+
+				/* Fixup most of the destination object (part that overlaps with forwarded header) */
+				forwardedHeader->commenceFixup(destinationObjectPtr);
+
+				/* Object model specific fixup, like age */
+				_extensions->objectModel.fixupForwardedObject(forwardedHeader, destinationObjectPtr, objectAge);
+
+				/* Final fixup step - the object is available for usage by mutator threads */
+				forwardedHeader->commitFixup(destinationObjectPtr);
+			} else
+#endif /* OMR_GC_CONCURRENT_SCAVENGER */
+			{
+				memcpy((void *)destinationObjectPtr, forwardedHeader->getObject(), objectCopySizeInBytes);
+
+				/* Copy the preserved fields from the forwarded header into the destination object */
+				forwardedHeader->fixupForwardedObject(destinationObjectPtr);
+
+				_extensions->objectModel.fixupForwardedObject(forwardedHeader, destinationObjectPtr, objectAge);
+			}
+
+#if defined(OMR_VALGRIND_MEMCHECK)
+			valgrindFreeObject(_extensions,(uintptr_t) forwardedHeader->getObject());
+
+			// Object is definitely dead but at many places (glue : ScavangerRootScanner)
+			// We use it's forwardedHeader to check it.
+			valgrindMakeMemDefined((uintptr_t) forwardedHeader->getObject(), sizeof(MM_ForwardedHeader));
+
+#endif /* defined(OMR_VALGRIND_MEMCHECK) */
+
+#if defined(OMR_SCAVENGER_TRACE_COPY)
+			OMRPORT_ACCESS_FROM_OMRPORT(env->getPortLibrary());
+			omrtty_printf("{SCAV: Copied %p[%p] -> %p[%p]}\n", forwardedHeader->getObject(), *((uintptr_t*)(forwardedHeader->getObject())), destinationObjectPtr, *((uintptr_t*)destinationObjectPtr));
+#endif /* OMR_SCAVENGER_TRACE_COPY */
+
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+			/* Concurrent Scavenger can update forwarding pointer only after the object has been copied
+			* (since mutator may access the object as soon as forwarding pointer is installed) */
+			if (allowDuplicate) {
+				/* On weak memory model, ensure that this candidate copy is visible
+				* before (potentially) winning forwarding */
+				MM_AtomicOperations::storeSync();
+				destinationObjectPtr = forwardedHeader->setForwardedObject(destinationObjectPtr);
+			}
+
+			/* nested if-forwarding-succeeded check */
+			if (originalDestinationObjectPtr == destinationObjectPtr) {
+				/* Succeeded in forwarding the object */
+#endif /* OMR_GC_CONCURRENT_SCAVENGER */
+				forwardingSucceeded(env, copyCache, newCacheAlloc, oldObjectAge, objectCopySizeInBytes, objectReserveSizeInBytes);
+
+				/* depth copy the hot fields of an object if scavenger dynamicBreadthFirstScanOrdering is enabled */
+				depthCopyHotFields(env, forwardedHeader, destinationObjectPtr);
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
+			} else { /* CS build flag  enabled: mid point of nested if-forwarding-succeeded check */
+
+				forwardingFailed(env, forwardedHeader, destinationObjectPtr, copyCache);
+
+			} /* CS build flag  enabled: end of nested if-forwarding-succeeded check */
+#endif
+		} else { /* CS build flag  enabled: mid point of outter   if-forwarding-succeeded check
+				* CS build flag disabled: mid point of the only if-forwarding-succeeded check */
+
+			forwardingFailed(env, forwardedHeader, destinationObjectPtr, copyCache);
+
+		} /* CS build flag  enabled: end of outter   if-forwarding-succeeded check
+		* CS build flag disabled: end of the only if-forwarding-succeeded check */
+
+		/* return value for updating the slot */
+		return destinationObjectPtr;
+	}
+
 	/* Flush remaining Copy Scan updates which would otherwise be discarded 
 	 * @param majorFlush last thread to flush updates should perform a major flush (push accumulated updates to history record) 
 	 */ 
@@ -285,14 +533,44 @@ public:
 	 * @param forwardedHeader Forwarded header of an object
 	 * @param destinationObjectPtr DestinationObjectPtr of the object described by the forwardedHeader
 	 */ 
-	MMINLINE void depthCopyHotFields(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHeader, omrobjectptr_t destinationObjectPtr);
-	
+	MMINLINE void depthCopyHotFields(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHeader, omrobjectptr_t destinationObjectPtr) {
+		/* depth copy the hot fields of an object up to a depth specified by depthCopyMax */
+		if (env->_hotFieldCopyDepthCount < _extensions->depthCopyMax) {
+			uint8_t hotFieldOffset = _extensions->objectModel.getHotFieldOffset(forwardedHeader);
+			if (U_8_MAX != hotFieldOffset) {
+				copyHotField(env, destinationObjectPtr, hotFieldOffset);
+				uint8_t hotFieldOffset2 = _extensions->objectModel.getHotFieldOffset2(forwardedHeader);
+				if (U_8_MAX != hotFieldOffset2) {
+					copyHotField(env, destinationObjectPtr, hotFieldOffset2);
+					uint8_t hotFieldOffset3 = _extensions->objectModel.getHotFieldOffset3(forwardedHeader);
+					if (U_8_MAX != hotFieldOffset3) {
+						copyHotField(env, destinationObjectPtr, hotFieldOffset3);
+					}
+				}
+			} else if (_extensions->alwaysDepthCopyFirstOffset && !_extensions->objectModel.isIndexable(forwardedHeader)) {
+				copyHotField(env, destinationObjectPtr, DEFAULT_HOT_FIELD_OFFSET);
+			}
+		}
+	}	
 	/* Copy the the hot field of an object.
 	 * Valid if scavenger dynamicBreadthScanOrdering is enabled.
 	 * @param destinationObjectPtr The object who's hot field will be copied
 	 * @param offset The object field offset of the hot field to be copied
 	 */ 
-	MMINLINE void copyHotField(MM_EnvironmentStandard *env, omrobjectptr_t destinationObjectPtr, uint8_t offset);
+	MMINLINE void copyHotField(MM_EnvironmentStandard *env, omrobjectptr_t destinationObjectPtr, uint8_t offset) {
+		bool const compressed = _extensions->compressObjectReferences();
+		GC_SlotObject hotFieldObject(_omrVM, GC_SlotObject::addToSlotAddress((fomrobject_t*)((uintptr_t)destinationObjectPtr), offset, compressed));
+		omrobjectptr_t objectPtr = hotFieldObject.readReferenceFromSlot();
+		if (isObjectInEvacuateMemory(objectPtr)) {
+			/* Hot field needs to be copy and forwarded.  Check if the work has already been done */
+			MM_ForwardedHeader forwardHeaderHotField(objectPtr, compressed);
+			if (!forwardHeaderHotField.isForwardedPointer()) {
+				env->_hotFieldCopyDepthCount += 1;
+				copyObject(env, &forwardHeaderHotField);
+				env->_hotFieldCopyDepthCount -= 1;
+			}
+		}
+	}
 
 	MMINLINE void updateCopyScanCounts(MM_EnvironmentBase* env, uint64_t slotsScanned, uint64_t slotsCopied);
 	bool splitIndexableObjectScanner(MM_EnvironmentStandard *env, GC_ObjectScanner *objectScanner, uintptr_t startIndex, omrobjectptr_t *rememberedSetSlot);
