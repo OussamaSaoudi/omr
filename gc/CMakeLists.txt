@@ -57,7 +57,7 @@ omr_add_library(omrgc_tracegen OBJECT
 )
 
 if(OMR_TOOLCONFIG STREQUAL "gnu")
-   set_source_files_properties(Scavenger.cpp PROPERTIES  COMPILE_FLAGS  -finline-limit=100)
+   set_source_files_properties(Scavenger.cpp PROPERTIES  COMPILE_FLAGS  -finline-limit=1000)
 endif()
 
 target_include_directories(omrgc_tracegen

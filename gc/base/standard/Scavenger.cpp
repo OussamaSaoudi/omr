@@ -1364,140 +1364,28 @@ retry:
 	return copyCache;
 }
 
-/**
- * Update the given slot to point at the new location of the object, after copying
- * the object if it was not already.
- * Attempt to copy (either flip or tenure) the object and install a forwarding
- * pointer at the new location. The object may have already been copied. In
- * either case, update the slot to point at the new location of the object.
- *
- * @param objectPtrIndirect the slot to be updated
- * @return true if the new location of the object is in new space
- * @return false otherwise
- */
-MMINLINE bool
-MM_Scavenger::copyAndForward(MM_EnvironmentStandard *env, volatile omrobjectptr_t *objectPtrIndirect)
-{
-	bool toReturn = false;
-	bool const compressed = _extensions->compressObjectReferences();
-
-	/* clear effectiveCopyCache to support aliasing check -- will be updated if copy actually takes place */
-	env->_effectiveCopyScanCache = NULL;
-
-	omrobjectptr_t objectPtr = *objectPtrIndirect;
-	if (NULL != objectPtr) {
-		if (isObjectInEvacuateMemory(objectPtr)) {
-			/* Object needs to be copy and forwarded.  Check if the work has already been done */
-			MM_ForwardedHeader forwardHeader(objectPtr, compressed);
-			omrobjectptr_t forwardPtr = forwardHeader.getForwardedObject();
-
-			if (NULL != forwardPtr) {
-				/* Object has been copied - update the forwarding information and return */
-				toReturn = isObjectInNewSpace(forwardPtr);
-				/* CS: ensure it's fully copied before exposing this new version of the object */
-				forwardHeader.copyOrWait(forwardPtr);
-				*objectPtrIndirect = forwardPtr;
-			} else {
-				omrobjectptr_t destinationObjectPtr = NULL;
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
-				bool csEnabled = IS_CONCURRENT_ENABLED;
-				if (csEnabled) {
-					destinationObjectPtr = copy<true>(env, &forwardHeader);
-				} else
-#endif /* OMR_GC_CONCURRENT_SCAVENGER */
-				{
-					destinationObjectPtr = copy<false>(env, &forwardHeader);
-				}
-
-				if (NULL == destinationObjectPtr) {
-					/* Failure - the scavenger must back out the work it has done. */
-					/* raise the alert and return (true - must look like a new object was handled) */
-					toReturn = true;
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
-					if (_extensions->concurrentScavenger) {
-						/* We have no place to copy. We will return the original location of the object.
-						 * But we must prevent any other thread of making a copy of this object.
-						 * So we will attempt to atomically self forward it.  */
-						forwardPtr = forwardHeader.setSelfForwardedObject();
-						if (forwardPtr != objectPtr) {
-							/* Failed to self-forward (someone successfully copied it). Re-fetch the forwarding info
-							 * and ensure it's fully copied before exposing this new version of the object */
-							toReturn = isObjectInNewSpace(forwardPtr);
-							MM_ForwardedHeader(objectPtr, compressed).copyOrWait(forwardPtr);
-							*objectPtrIndirect = forwardPtr;
-						}
-					}
-#endif /* OMR_GC_CONCURRENT_SCAVENGER */
-				} else {
-					/* Update the slot. copy() ensures the object is fully copied */
-					toReturn = isObjectInNewSpace(destinationObjectPtr);
-					*objectPtrIndirect = destinationObjectPtr;
-				}
-			}
-		} else if (isObjectInNewSpace(objectPtr)) {
-#if defined(OMR_GC_MODRON_SCAVENGER_STRICT)
-			MM_ForwardedHeader forwardHeader(objectPtr, compressed);
-			Assert_MM_true(!forwardHeader.isForwardedPointer());
-#endif /* defined(OMR_GC_MODRON_SCAVENGER_STRICT) */
-			/* When slot has been scanned before, and is already copied or forwarded
-			 * for example when the partial scan state of a cache has been lost in scan cache overflow
-			 */
-			toReturn = true;
-#if defined(OMR_GC_MODRON_SCAVENGER_STRICT)
-		} else {
-			Assert_MM_true(_extensions->isOld(objectPtr));
-#endif /* defined(OMR_GC_MODRON_SCAVENGER_STRICT) */
-		}
-	}
-
-	return toReturn;
-}
-
-/**
- * Update the given slot to point at the new location of the object, after copying
- * the object if it was not already.
- * Attempt to copy (either flip or tenure) the object and install a forwarding
- * pointer at the new location. The object may have already been copied. In
- * either case, update the slot to point at the new location of the object.
- *
- * @param slotObject the slot to be updated
- * @return true if the new location of the object is in new space
- * @return false otherwise
- */
-MMINLINE bool
-MM_Scavenger::copyAndForward(MM_EnvironmentStandard *env, GC_SlotObject *slotObject)
-{
-	omrobjectptr_t oldSlot = slotObject->readReferenceFromSlot();
-	omrobjectptr_t slot = oldSlot;
-	bool result = copyAndForward(env, &slot);
-#if defined(OMR_GC_CONCURRENT_SCAVENGER)
-	if (concurrent_phase_scan == _concurrentPhase) {
-		if (oldSlot != slot) {
-			slotObject->atomicWriteReferenceToSlot(oldSlot, slot);
-		}
-	} else
-#endif /* OMR_GC_CONCURRENT_SCAVENGER */
-	{
-		slotObject->writeReferenceToSlot(slot);
-	}
-#if defined(OMR_SCAVENGER_TRACK_COPY_DISTANCE)
-	if (NULL != env->_effectiveCopyScanCache) {
-		env->_scavengerStats.countCopyDistance((uintptr_t)slotObject->readAddressFromSlot(), (uintptr_t)slotObject->readReferenceFromSlot());
-	}
-#endif /* OMR_SCAVENGER_TRACK_COPY_DISTANCE */
-	return result;
-}
-
 bool
 MM_Scavenger::copyObjectSlot(MM_EnvironmentStandard *env, volatile omrobjectptr_t *slotPtr)
 {
-	return copyAndForward(env, slotPtr);
+	bool result = false;
+	if (IS_CONCURRENT_ENABLED) {
+		result = copyAndForward<true>(env, slotPtr);
+	} else {
+		result = copyAndForward<false>(env, slotPtr);
+	}
+	return result;
 }
 
 bool
 MM_Scavenger::copyObjectSlot(MM_EnvironmentStandard *env, GC_SlotObject *slotObject)
 {
-	return copyAndForward(env, slotObject);
+	bool result = false;
+	if (IS_CONCURRENT_ENABLED) {
+		result = copyAndForward<true>(env, slotObject);
+	} else {
+		result = copyAndForward<false>(env, slotObject);
+	}
+	return result;
 }
 
 omrobjectptr_t
@@ -1510,8 +1398,7 @@ MM_Scavenger::copyObject(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwar
 //		setBackOutFlag(env, backOutFlagRaised);
 //		return NULL;
 //	}
-	bool csEnabled = IS_CONCURRENT_ENABLED;
-	if (csEnabled) {
+	if (IS_CONCURRENT_ENABLED) {
 		objectPtr = copy<true>(env, forwardedHeader);
 	} else
 #endif /* OMR_GC_CONCURRENT_SCAVENGER */
@@ -1718,11 +1605,17 @@ MM_Scavenger::scavengeObjectSlots(MM_EnvironmentStandard *env, MM_CopyScanCacheS
 	uint64_t slotsCopied = 0;
 	uint64_t slotsScanned = 0;
 	bool shouldRemember = false;
+	bool csEnabled = IS_CONCURRENT_ENABLED;
 	GC_SlotObject *slotObject = NULL;
 
 	MM_CopyScanCacheStandard **copyCache = &(env->_effectiveCopyScanCache);
 	while (NULL != (slotObject = objectScanner->getNextSlot())) {
-		bool isSlotObjectInNewSpace = copyAndForward(env, slotObject);
+		bool isSlotObjectInNewSpace = false;
+		if (csEnabled) {
+			isSlotObjectInNewSpace = copyAndForward<true>(env, slotObject);
+		} else {
+			isSlotObjectInNewSpace = copyAndForward<false>(env, slotObject);
+		}
 		shouldRemember |= isSlotObjectInNewSpace;
 		if (NULL != *copyCache) {
 			slotsCopied += 1;
@@ -1740,7 +1633,7 @@ MM_Scavenger::scavengeObjectSlots(MM_EnvironmentStandard *env, MM_CopyScanCacheS
 	}
 #if defined(OMR_GC_MODRON_CONCURRENT_MARK)
 	bool isParentInNewSpace = isObjectInNewSpace(objectPtr);
-	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && IS_CONCURRENT_ENABLED && !isParentInNewSpace && !shouldRemember) {
+	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && csEnabled && !isParentInNewSpace && !shouldRemember) {
 		/* Old object that has only references to old objects. If parent object has already been scanned (in Marking sense)
 		 * since it has been tenured, let Concurrent Marker know it has a newly created old reference, otherwise it may miss to find it. */
 		oldToOldReferenceCreated(env, objectPtr);
@@ -1762,10 +1655,14 @@ MM_Scavenger::deepScanOutline(MM_EnvironmentStandard *env, omrobjectptr_t object
 	uintptr_t objDeepScanned = 0;
 	env->_scavengerStats._totalDeepStructures += 1;
 #endif /* J9MODRON_TGC_PARALLEL_STATISTICS */
-
+	bool csEnabled = IS_CONCURRENT_ENABLED;
 	do {
 		GC_SlotObject prioritySlot(env->getOmrVM(), (fomrobject_t*)(((uintptr_t) currentDeepObj) + priorityField));
-		copyAndForward(env, &prioritySlot);
+		if (csEnabled) {
+			copyAndForward<true>(env, &prioritySlot);
+		} else {
+			copyAndForward<false>(env, &prioritySlot);
+		}
 		/* Did we encounter an already visited/NULL object? */
 		if (NULL == env->_effectiveCopyScanCache) {
 			/* Can't continue any further - attempt to deep scan with other self referencing field (e.g, prev field) */
@@ -1854,10 +1751,15 @@ MM_Scavenger::incrementalScavengeObjectSlots(MM_EnvironmentStandard *env, omrobj
 	GC_SlotObject *slotObject;
 	uint64_t slotsCopied = 0;
 	uint64_t slotsScanned = 0;
-
+	bool csEnabled = IS_CONCURRENT_ENABLED;
 	while (NULL != (slotObject = objectScanner->getNextSlot())) {
 		/* If the object should be remembered and it is in old space, remember it */
-		bool isSlotObjectInNewSpace = copyAndForward(env, slotObject);
+		bool isSlotObjectInNewSpace = false;
+		if (csEnabled) {
+			isSlotObjectInNewSpace = copyAndForward<true>(env, slotObject);
+		} else {
+			isSlotObjectInNewSpace = copyAndForward<false>(env, slotObject);
+		}
 		scanCache->_shouldBeRemembered |= isSlotObjectInNewSpace;
 		slotsScanned += 1;
 
@@ -1892,7 +1794,7 @@ MM_Scavenger::incrementalScavengeObjectSlots(MM_EnvironmentStandard *env, omrobj
 
 #if defined(OMR_GC_MODRON_CONCURRENT_MARK)
 	bool isParentInNewSpace = isObjectInNewSpace(objectPtr);
-	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && IS_CONCURRENT_ENABLED && !isParentInNewSpace && !scanCache->_shouldBeRemembered) {
+	if (_extensions->shouldScavengeNotifyGlobalGCOfOldToOldReference() && csEnabled && !isParentInNewSpace && !scanCache->_shouldBeRemembered) {
 		/* Old object that has only references to old objects. If parent object has already been scanned (in Marking sense)
 		 * since it has been tenured, let Concurrent Marker know it has a newly created old reference, otherwise it may miss to find it. */
 		oldToOldReferenceCreated(env, objectPtr);
@@ -2106,7 +2008,6 @@ MM_Scavenger::completeScanCache(MM_EnvironmentStandard *env, MM_CopyScanCacheSta
 	/* mark that cache is in use as a scan cache */
 	Assert_MM_true(0 == (scanCache->flags & OMR_SCAVENGER_CACHE_TYPE_SCAN));
 	scanCache->flags |= OMR_SCAVENGER_CACHE_TYPE_SCAN;
-
 	if (scanCache->isSplitArray()) {
 		/* Advance the scan pointer to the top of the cache to signify that this has been scanned */
 		objectPtr = (omrobjectptr_t)scanCache->scanCurrent;
@@ -2888,16 +2789,22 @@ MM_Scavenger::copyAndForwardThreadSlot(MM_EnvironmentStandard *env, omrobjectptr
 {
 	/* auto-remember stack- and thread-referenced objects */
 	omrobjectptr_t objectPtr = *objectPtrIndirect;
+	bool csEnabled = IS_CONCURRENT_ENABLED;
 	if(NULL != objectPtr) {
 		if (isObjectInEvacuateMemory(objectPtr)) {
-			bool isInNewSpace = copyAndForward(env, objectPtrIndirect);
-			if (!IS_CONCURRENT_ENABLED && !isInNewSpace) {
+			bool isInNewSpace = false;
+			if (csEnabled) {
+				isInNewSpace = copyAndForward<true>(env, objectPtrIndirect);
+			} else {
+				isInNewSpace = copyAndForward<false>(env, objectPtrIndirect);
+			}
+			if (!csEnabled && !isInNewSpace) {
 				Trc_MM_ParallelScavenger_copyAndForwardThreadSlot_deferRememberObject(env->getLanguageVMThread(), *objectPtrIndirect);
 				/* the object was tenured while it was referenced from the stack. Undo the forward, and process it in the rescan pass. */
 				_rescanThreadsForRememberedObjects = true;
 				*objectPtrIndirect = objectPtr;
 			}
-		} else if (!IS_CONCURRENT_ENABLED) {
+		} else if (!csEnabled) {
 			if (_extensions->isOld(objectPtr)) {
 				if(_extensions->objectModel.atomicSwitchReferencedState(objectPtr, OMR_TENURED_STACK_OBJECT_RECENTLY_REFERENCED, OMR_TENURED_STACK_OBJECT_CURRENTLY_REFERENCED)) {
 					Trc_MM_ParallelScavenger_copyAndForwardThreadSlot_renewingRememberedObject(env->getLanguageVMThread(), objectPtr,
