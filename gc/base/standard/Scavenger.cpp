@@ -1574,7 +1574,11 @@ MM_Scavenger::deepScanOutline(MM_EnvironmentStandard *env, omrobjectptr_t object
 	uintptr_t objDeepScanned = 0;
 	env->_scavengerStats._totalDeepStructures += 1;
 #endif /* J9MODRON_TGC_PARALLEL_STATISTICS */
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool csEnabled = IS_CONCURRENT_ENABLED;
+#else 	/* OMR_GC_CONCURRENT_SCAVENGER */
+	bool csEnabled = false;
+#endif
 	do {
 		GC_SlotObject prioritySlot(env->getOmrVM(), (fomrobject_t*)(((uintptr_t) currentDeepObj) + priorityField));
 		if (csEnabled) {
@@ -1817,7 +1821,11 @@ MM_Scavenger::completeScanCache(MM_EnvironmentStandard *env, MM_CopyScanCacheSta
 	/* mark that cache is in use as a scan cache */
 	Assert_MM_true(0 == (scanCache->flags & OMR_SCAVENGER_CACHE_TYPE_SCAN));
 	scanCache->flags |= OMR_SCAVENGER_CACHE_TYPE_SCAN;
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool csEnabled = IS_CONCURRENT_ENABLED;
+#else 	/* OMR_GC_CONCURRENT_SCAVENGER */
+	bool csEnabled = false;
+#endif
 	if (scanCache->isSplitArray()) {
 		/* Advance the scan pointer to the top of the cache to signify that this has been scanned */
 		objectPtr = (omrobjectptr_t)scanCache->scanCurrent;
@@ -1879,7 +1887,11 @@ nextCache:
 	/* mark that cache is in use as a scan cache */
 	Assert_MM_true(0 == (scanCache->flags & OMR_SCAVENGER_CACHE_TYPE_SCAN));
 	scanCache->flags |= OMR_SCAVENGER_CACHE_TYPE_SCAN;
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool csEnabled = IS_CONCURRENT_ENABLED;
+#else 	/* OMR_GC_CONCURRENT_SCAVENGER */
+	bool csEnabled = false;
+#endif
 	while (scanCache->isScanWorkAvailable()) {
 		void *cacheAlloc = scanCache->cacheAlloc;
 		GC_ObjectHeapIteratorAddressOrderedList heapChunkIterator(
@@ -2467,7 +2479,11 @@ MM_Scavenger::scavengeRememberedSetListDirect(MM_EnvironmentStandard *env)
 	Trc_MM_ParallelScavenger_scavengeRememberedSetList_Entry(env->getLanguageVMThread());
 
 	MM_SublistPuddle *puddle = NULL;
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool csEnabled = IS_CONCURRENT_ENABLED;
+#else 	/* OMR_GC_CONCURRENT_SCAVENGER */
+	bool csEnabled = false;
+#endif	
 	while (NULL != (puddle = _extensions->rememberedSet.popPreviousPuddle(puddle))) {
 		Trc_MM_ParallelScavenger_scavengeRememberedSetList_startPuddle(env->getLanguageVMThread(), puddle);
 		uintptr_t numElements = 0;
@@ -2508,7 +2524,11 @@ MM_Scavenger::scavengeRememberedSetListIndirect(MM_EnvironmentStandard *env)
 	Trc_MM_ParallelScavenger_scavengeRememberedSetList_Entry(env->getLanguageVMThread());
 
 	MM_SublistPuddle *puddle = NULL;
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool csEnabled = IS_CONCURRENT_ENABLED;
+#else 	/* OMR_GC_CONCURRENT_SCAVENGER */
+	bool csEnabled = false;
+#endif	/* OMR_GC_CONCURRENT_SCAVENGER */
 	while (NULL != (puddle = _extensions->rememberedSet.popPreviousPuddle(puddle))) {
 		Trc_MM_ParallelScavenger_scavengeRememberedSetList_startPuddle(env->getLanguageVMThread(), puddle);
 		uintptr_t numElements = 0;
@@ -2555,7 +2575,6 @@ MM_Scavenger::scavengeRememberedSetList(MM_EnvironmentStandard *env)
 
 	/* Remembered set walk */
 	MM_SublistPuddle *puddle = NULL;
-	bool csEnabled = IS_CONCURRENT_ENABLED;
 	while (NULL != (puddle = _extensions->rememberedSet.popPreviousPuddle(puddle))) {
 		Trc_MM_ParallelScavenger_scavengeRememberedSetList_startPuddle(env->getLanguageVMThread(), puddle);
 		uintptr_t numElements = 0;
@@ -2573,12 +2592,7 @@ MM_Scavenger::scavengeRememberedSetList(MM_EnvironmentStandard *env)
 				 * Flag slot for later removal if we complete scavenge OK
 				 */
 				*slotPtr = (omrobjectptr_t)((uintptr_t)*slotPtr | DEFERRED_RS_REMOVE_FLAG);
-				bool shouldBeRemembered = false;
-				if (csEnabled) {
-					shouldBeRemembered = scavengeObjectSlots<true>(env, NULL, objectPtr, GC_ObjectScanner::scanRoots, slotPtr);
-				} else {
-					shouldBeRemembered = scavengeObjectSlots<false>(env, NULL, objectPtr, GC_ObjectScanner::scanRoots, slotPtr);
-				}
+				bool shouldBeRemembered = scavengeObjectSlots<false>(env, NULL, objectPtr, GC_ObjectScanner::scanRoots, slotPtr);
 				if (_extensions->objectModel.hasIndirectObjectReferents((CLI_THREAD_TYPE*)env->getLanguageVMThread(), objectPtr)) {
 					shouldBeRemembered |= _delegate.scavengeIndirectObjectSlots(env, objectPtr);
 				}
@@ -2637,7 +2651,11 @@ MM_Scavenger::copyAndForwardThreadSlot(MM_EnvironmentStandard *env, omrobjectptr
 {
 	/* auto-remember stack- and thread-referenced objects */
 	omrobjectptr_t objectPtr = *objectPtrIndirect;
+#if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool csEnabled = IS_CONCURRENT_ENABLED;
+#else 	/* OMR_GC_CONCURRENT_SCAVENGER */
+	bool csEnabled = false;
+#endif
 	if(NULL != objectPtr) {
 		if (isObjectInEvacuateMemory(objectPtr)) {
 			bool isInNewSpace = false;
