@@ -323,6 +323,7 @@ if(OMR_GC_MODRON_STANDARD)
 				base/standard/PhysicalSubArenaVirtualMemorySemiSpace.cpp
 				base/standard/RSOverflow.cpp
 				base/standard/Scavenger.cpp
+				base/standard/ConcurrentScavenger.cpp
 
 				stats/ScavengerCopyScanRatio.cpp
 		)
